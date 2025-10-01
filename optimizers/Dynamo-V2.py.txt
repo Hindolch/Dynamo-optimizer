@@ -1,0 +1,127 @@
+import torch
+import math
+
+class Dynamo(torch.optim.Optimizer):
+    """
+    Implements the improved Dynamo optimizer (Version V2), which solves convergence issues using state-dependent regularization.
+    Core improvement: Utilizes the second-moment of parameter groups to adjust the strength of the escape mechanism, making it automatically weaken during convergence.
+    """
+    def __init__(self, params, lr=1e-3, c=0.1, s=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+        """
+        Initializes the improved Dynamo optimizer.
+
+        Args:
+            params (iterable): Model parameters.
+            lr (float, optional): Learning rate (default: 1e-3).
+            c (float, optional): Relative escape strength coefficient (default: 0.1).
+            s (float, optional): Feature scale parameter, defines the activation boundary of the escape mechanism (default: 0.01).
+            betas (Tuple[float, float], optional): Coefficients for calculating momentum and RMSprop (default: (0.9, 0.999)).
+            eps (float, optional): Term added to the denominator for numerical stability (default: 1e-8).
+            weight_decay (float, optional): Weight decay coefficient (default: 0.01).
+        """
+        if not 0.0 <= lr:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= eps:
+            raise ValueError(f"Invalid epsilon value: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+        if not 0.0 <= c:
+            raise ValueError(f"Invalid c value: {c}")
+        if not 0.0 <= s:
+            raise ValueError(f"Invalid s value: {s}")
+
+        defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            c = group['c']
+            s = group['s']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+            
+            # Calculate the average second-moment M2 of the entire parameter group
+            M2 = 0.0
+            total_params = 0
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                M2 += torch.sum(p.data ** 2).item()
+                total_params += p.data.numel()
+            
+            if total_params > 0:
+                M2 /= total_params  # E[p^2]
+            else:
+                M2 = 0.0
+            
+            # Calculate the state-dependent modulation factor γ
+            if s > 0 and M2 > 0:
+                gamma = math.tanh(M2 / (s * s))
+            else:
+                gamma = 0.0
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                # 1. AdamW: Decouple weight decay from gradient
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
+
+                grad = p.grad.data
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+                
+                # 2. Calculate first-order and second-order momentum
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # 3. Bias correction
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                
+                # 4. Calculate standard Adam update
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+                update_adam = -step_size * (exp_avg / denom)
+
+                # 5. Dynamo-V2 core logic: State-dependent soft escape mechanism
+                threshold = lr * c
+                
+                # Calculate soft mixing factor α
+                alpha = torch.clamp(1 - update_adam.abs() / threshold, min=0.0)
+                
+                # Calculate escape update
+                p_mean = p.data.mean()
+                escape_direction = torch.sign(p.data - p_mean)
+                # Handle cases where p.data == p_mean to avoid zero updates
+                escape_direction[escape_direction == 0] = 1.0
+                escape_update = escape_direction * threshold
+                
+                # 6. Synthesize final update: Soft mixing + state modulation
+                final_update = (1 - alpha) * update_adam + alpha * gamma * escape_update
+
+                # 7. Apply final update
+                p.data.add_(final_update)
+
+        return loss

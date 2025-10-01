@@ -1,0 +1,144 @@
+(venv) PS D:\Dynamo optimizer> python -m experiments.x               
+Make sure you have installed lion-pytorch:
+pip install lion-pytorch
+For fused kernels (optional): pip install triton -U --pre
+
+Using device: cuda
+
+===== Training with AdamW (ResNet18) =====
+Hyperparameters: {'lr': 0.0003, 'weight_decay': 0.01}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_adamw.csv every 5s        
+AdamW | Epoch 1: Loss=1.6119, Acc=52.24%
+AdamW | Epoch 2: Loss=1.2866, Acc=56.05%
+AdamW | Epoch 3: Loss=1.1339, Acc=63.62%
+AdamW | Epoch 4: Loss=1.0252, Acc=66.79%
+AdamW | Epoch 5: Loss=0.9462, Acc=67.18%
+AdamW | Epoch 6: Loss=0.8819, Acc=69.50%
+AdamW | Epoch 7: Loss=0.8295, Acc=71.39%
+AdamW | Epoch 8: Loss=0.7932, Acc=70.29%
+AdamW | Epoch 9: Loss=0.7592, Acc=71.96%
+AdamW | Epoch 10: Loss=0.7200, Acc=75.11%
+
+===== Training with Lion (ResNet18) =====
+Hyperparameters: {'lr': 0.0001, 'weight_decay': 0.03}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_lion.csv every 5s
+Lion | Epoch 1: Loss=1.5755, Acc=54.71%
+Lion | Epoch 2: Loss=1.1654, Acc=63.44%
+Lion | Epoch 3: Loss=0.9916, Acc=68.02%
+Lion | Epoch 4: Loss=0.8778, Acc=70.94%
+Lion | Epoch 5: Loss=0.8089, Acc=73.25%
+Lion | Epoch 6: Loss=0.7454, Acc=74.62%
+Lion | Epoch 7: Loss=0.7036, Acc=76.01%
+Lion | Epoch 8: Loss=0.6652, Acc=76.36%
+Lion | Epoch 9: Loss=0.6291, Acc=78.21%
+Lion | Epoch 10: Loss=0.6054, Acc=78.83%
+
+===== Training with Dynamo (ResNet18) =====
+Hyperparameters: {'lr': 0.0003, 'weight_decay': 0.01}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_dynamo.csv every 5s       
+Dynamo | Epoch 1: Loss=1.6026, Acc=46.54%
+Dynamo | Epoch 2: Loss=1.2880, Acc=59.75%
+Dynamo | Epoch 3: Loss=1.1414, Acc=57.45%
+Dynamo | Epoch 4: Loss=1.0456, Acc=63.92%
+Dynamo | Epoch 5: Loss=0.9942, Acc=59.40%
+Dynamo | Epoch 6: Loss=0.9411, Acc=67.01%
+Dynamo | Epoch 7: Loss=0.9015, Acc=68.72%
+Dynamo | Epoch 8: Loss=0.8781, Acc=65.34%
+Dynamo | Epoch 9: Loss=0.8500, Acc=66.16%
+Dynamo | Epoch 10: Loss=0.8249, Acc=68.61%
+
+============================================================
+FINAL RESULTS SUMMARY
+============================================================
+AdamW        | Final:  75.11% | Best:  75.11% (Epoch 10)
+Lion         | Final:  78.83% | Best:  78.83% (Epoch 10)
+Dynamo       | Final:  68.61% | Best:  68.72% (Epoch 7)
+============================================================
+
+SINGULAR SPECTRUM ANALYSIS:
+AdamW        | Top-5 concentration: 0.551 | Effective rank: 9.83
+Lion         | Top-5 concentration: 0.613 | Effective rank: 9.01
+Dynamo       | Top-5 concentration: 0.619 | Effective rank: 9.15
+(venv) PS D:\Dynamo optimizer> 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+(venv) PS D:\Dynamo optimizer> python -m experiments.x
+Make sure you have installed lion-pytorch:
+pip install lion-pytorch
+For fused kernels (optional): pip install triton -U --pre
+
+Using device: cuda
+
+===== Training with AdamW (ResNet18) =====
+Hyperparameters: {'lr': 0.0003, 'weight_decay': 0.01}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_adamw.csv every 5s     
+AdamW | Epoch 1: Loss=1.5960, Acc=53.73%
+AdamW | Epoch 2: Loss=1.2682, Acc=59.60%
+AdamW | Epoch 3: Loss=1.1158, Acc=63.52%
+AdamW | Epoch 4: Loss=1.0171, Acc=67.59%
+
+===== Training with Lion (ResNet18) =====
+Hyperparameters: {'lr': 0.0001, 'weight_decay': 0.03}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_lion.csv every 5s      
+Lion | Epoch 1: Loss=1.5775, Acc=55.07%
+Lion | Epoch 2: Loss=1.1727, Acc=63.45%
+Lion | Epoch 3: Loss=0.9921, Acc=67.98%
+Lion | Epoch 4: Loss=0.8842, Acc=71.69%
+
+===== Training with Dynamo (ResNet18) =====
+Hyperparameters: {'lr': 0.0002, 'weight_decay': 0.01}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_dynamo.csv every 5s    
+Dynamo | Epoch 1: Loss=1.6496, Acc=50.82%
+Dynamo | Epoch 2: Loss=1.3451, Acc=54.37%
+Dynamo | Epoch 3: Loss=1.2006, Acc=58.87%
+Dynamo | Epoch 4: Loss=1.1015, Acc=64.68%
+
+===== Training with RAdam (ResNet18) =====
+Hyperparameters: {'lr': 0.0002, 'weight_decay': 0.01, 'decoupled_weight_decay': True}
+[GPU Monitor] Logging to results/gpu_logs\gpu_log_radam.csv every 5s     
+RAdam | Epoch 1: Loss=1.9252, Acc=43.23%
+RAdam | Epoch 2: Loss=1.5303, Acc=49.73%
+RAdam | Epoch 3: Loss=1.3745, Acc=54.88%
+RAdam | Epoch 4: Loss=1.2531, Acc=58.00%
+
+============================================================
+FINAL RESULTS SUMMARY
+============================================================
+AdamW        | Final:  67.59% | Best:  67.59% (Epoch 4)
+Lion         | Final:  71.69% | Best:  71.69% (Epoch 4)
+Dynamo       | Final:  64.68% | Best:  64.68% (Epoch 4)
+RAdam        | Final:  58.00% | Best:  58.00% (Epoch 4)
+============================================================
+
+SINGULAR SPECTRUM ANALYSIS:
+AdamW        | Top-5 concentration: 0.545 | Effective rank: 9.89
+Lion         | Top-5 concentration: 0.594 | Effective rank: 9.55
+Dynamo       | Top-5 concentration: 0.548 | Effective rank: 9.87
+RAdam        | Top-5 concentration: 0.535 | Effective rank: 9.93
+(venv) PS D:\Dynamo optimizer> 
