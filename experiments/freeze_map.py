@@ -10,6 +10,7 @@ import os
 
 from optimizers.dynamo import DynamoV2
 from lion_pytorch import Lion
+from optimizers.muon import SingleDeviceMuon
 
 
 class SimpleCNN(nn.Module):
@@ -35,7 +36,12 @@ class SimpleCNN(nn.Module):
 def train_model(optimizer_class, name, train_loader, device, epochs=1,
                 thresholds=[1e-8, 1e-7, 1e-6, 1e-5, 1e-4], **opt_kwargs):
     model = SimpleCNN().to(device)
-    optimizer = optimizer_class(model.parameters(), **opt_kwargs)
+    # Special-case Muon: it requires a list of 2D+ params
+    if optimizer_class is SingleDeviceMuon:
+        muon_params = [p for p in model.parameters() if p.ndim >= 2]
+        optimizer = optimizer_class(muon_params, **opt_kwargs)
+    else:
+        optimizer = optimizer_class(model.parameters(), **opt_kwargs)
     criterion = nn.CrossEntropyLoss()
 
     # Tracking
@@ -87,8 +93,12 @@ def main():
     optimizers = {
         "AdamW": (AdamW, {"lr": 1e-3, "weight_decay": 1e-2}),
         "Lion": (Lion, {"lr": 1e-3, "weight_decay": 1e-2, "betas": (0.9, 0.99)}),
-        "DynamoV2": (DynamoV2, {"lr": 1e-3, "weight_decay": 1e-2}),
+        "DynamoV2": (DynamoV2, {"lr": 1e-3,
+            "c": 0.075,
+            "s": 3,
+            "weight_decay": 1e-2}),
         "RAdam": (RAdam, {"lr": 1e-3, "weight_decay": 1e-2, "decoupled_weight_decay": True}),
+        "Muon": (SingleDeviceMuon, {"lr": 0.02, "momentum": 0.95, "weight_decay": 0}),
     }
 
     thresholds = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]
@@ -116,9 +126,12 @@ def main():
     plt.show()
 
     # --- Plot 2: Histograms ---
-    plt.figure(figsize=(14, 6))
+    num_methods = len(results)
+    cols = 2
+    rows = (num_methods + cols - 1) // cols
+    plt.figure(figsize=(14, 3 * rows))
     for i, (name, (_, hist, _)) in enumerate(results.items()):
-        plt.subplot(2, 2, i + 1)
+        plt.subplot(rows, cols, i + 1)
         plt.hist(hist, bins=100, log=True)
         plt.title(f"{name} Update Magnitudes")
         plt.xlabel("|Δθ|")

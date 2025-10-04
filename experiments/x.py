@@ -6,9 +6,13 @@ import matplotlib.pyplot as plt
 import sys, os
 from torch.optim.optimizer import Optimizer
 import csv
+import torch.distributed as dist
 
 # Official Lion optimizer - install with: pip install lion-pytorch
 from lion_pytorch import Lion
+
+# Muon optimizer - install with: pip install git+https://github.com/KellerJordan/Muon
+from muon import MuonWithAuxAdam
 
 # Your custom optimizers
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -715,16 +719,51 @@ class DynamoRayleigh(Optimizer):
             return float('nan')
 
 # ---------------------
+# Muon wrapper for ResNet18
+# ---------------------
+def create_muon_optimizer(model, **kwargs):
+    """Create Muon optimizer with proper parameter groups for ResNet18."""
+    # Separate parameters according to Muon's requirements
+    # For ResNet18: body = all layers except fc, head = fc layer
+    hidden_weights = []
+    hidden_gains_biases = []
+    nonhidden_params = []
+    
+    for name, param in model.named_parameters():
+        if name.startswith('fc'):  # Classifier head
+            nonhidden_params.append(param)
+        else:  # Body layers (conv, bn, etc.)
+            if param.ndim >= 2:  # Weight matrices/kernels
+                hidden_weights.append(param)
+            else:  # Biases, gains, etc.
+                hidden_gains_biases.append(param)
+    
+    # Create parameter groups for Muon
+    param_groups = [
+        dict(params=hidden_weights, use_muon=True,
+             lr=kwargs.get('lr', 0.02), weight_decay=kwargs.get('weight_decay', 0.01)),
+        dict(params=hidden_gains_biases + nonhidden_params, use_muon=False,
+             lr=kwargs.get('aux_lr', 3e-4), betas=(0.9, 0.95), weight_decay=kwargs.get('weight_decay', 0.01)),
+    ]
+    
+    return MuonWithAuxAdam(param_groups)
+
+# ---------------------
 # Training utility with proper Lion hyperparameters
 # ---------------------
-def train_and_eval(optimizer_name, optimizer_class, trainloader, testloader, device, epochs=3, **optimizer_kwargs):
+def train_and_eval(optimizer_name, optimizer_class, trainloader, testloader, device, epochs=10, **optimizer_kwargs):
     # ResNet18 backbone
     model = torchvision.models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, 10)  # CIFAR10 has 10 classes
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optimizer_class(model.parameters(), **optimizer_kwargs)
+    
+    # Special handling for Muon optimizer
+    if optimizer_name == "Muon":
+        optimizer = create_muon_optimizer(model, **optimizer_kwargs)
+    else:
+        optimizer = optimizer_class(model.parameters(), **optimizer_kwargs)
 
     train_losses, test_accs = [], []
 
@@ -787,6 +826,22 @@ def compute_singular_values(model, layer_name="fc.weight"):
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Initialize distributed training for Muon (single GPU)
+    if not dist.is_initialized():
+        try:
+            # Try to initialize with environment variables
+            dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo')
+        except:
+            # If that fails, try manual initialization
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = '12355'
+            os.environ['RANK'] = '0'
+            os.environ['WORLD_SIZE'] = '1'
+            dist.init_process_group(backend='nccl' if torch.cuda.is_available() else 'gloo', 
+                                   init_method='env://', 
+                                   world_size=1, 
+                                   rank=0)
 
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -825,6 +880,13 @@ def main():
             "weight_decay": 3e-2, # 3x larger than AdamW
             # Note: betas default to (0.9, 0.99) in lion-pytorch package
             # Optional: use_triton=True for fused kernels (requires: pip install triton -U --pre)
+        }),
+        
+        # Muon optimizer with recommended hyperparameters
+        ("Muon", None, {  # None because we use create_muon_optimizer
+            "lr": 0.02,              # High LR for hidden weights (muP scaling)
+            "aux_lr": 3e-4,          # Lower LR for auxiliary parameters
+            "weight_decay": 0.01,    # Standard weight decay
         }),
         
         # Your Dynamo optimizer
@@ -930,6 +992,10 @@ def main():
         top_5_ratio = spectrum[:5].sum() / spectrum.sum()
         effective_rank = (spectrum.sum()**2) / (spectrum**2).sum()  # Participation ratio
         print(f"{name:12} | Top-5 concentration: {top_5_ratio:.3f} | Effective rank: {effective_rank:.2f}")
+    
+    # Cleanup distributed training
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

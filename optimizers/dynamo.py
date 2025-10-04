@@ -602,7 +602,7 @@ class DynamoV2(torch.optim.Optimizer):
     Implements the improved Dynamo optimizer (Version V2), which solves convergence issues using state-dependent regularization.
     Core improvement: Utilizes the second-moment of parameter groups to adjust the strength of the escape mechanism, making it automatically weaken during convergence.
     """
-    def __init__(self, params, lr=1e-3,  c=0.075, s=5.727,betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2):
+    def __init__(self, params, lr=1e-3,  c=0.075, s=3,betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2):
         """
         Initializes the improved Dynamo optimizer.
 
@@ -718,6 +718,286 @@ class DynamoV2(torch.optim.Optimizer):
                 final_update = (1 - alpha) * update_adam + alpha * gamma * escape_update
 
                 # 7. Apply final update
+                p.data.add_(final_update)
+
+        return loss
+
+class DynamoV2Adaptive(torch.optim.Optimizer):
+    """
+    Improved DynamoV2-Adaptive Optimizer
+    
+    Key improvements:
+    - Better adaptive c: increases when training stalls (gradient norm drops)
+    - Warmup + plateau schedule for s (not aggressive decay)
+    - Conservative adaptive lr (optional, disabled by default)
+    - Automatic step counting for proper scheduling
+    """
+
+    def __init__(self, params, lr=1e-3, c=0.075, s=3,
+                 betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-2, 
+                 c_min=0.05, c_max=0.15,  # Range for adaptive c
+                 s_warmup_steps=500,      # Steps to reach full s
+                 adaptive_lr=False):
+        """
+        Args:
+            params: Model parameters
+            lr: Base learning rate
+            c: Base escape strength coefficient
+            s: Base feature scale parameter
+            betas: Momentum coefficients
+            eps: Numerical stability
+            weight_decay: Weight decay coefficient
+            c_min, c_max: Min/max bounds for adaptive c
+            s_warmup_steps: Steps to warm up s parameter
+            adaptive_lr: Enable adaptive learning rate (experimental)
+        """
+        defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps,
+                        weight_decay=weight_decay,
+                        c_min=c_min, c_max=c_max,
+                        s_warmup_steps=s_warmup_steps,
+                        adaptive_lr=adaptive_lr)
+        super().__init__(params, defaults)
+        
+        # Global step counter across all parameter groups
+        self.global_step = 0
+        
+        # Track gradient statistics for adaptation
+        self.grad_norm_ema = None
+        self.grad_norm_std = None
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        self.global_step += 1
+
+        for group in self.param_groups:
+            base_lr = group['lr']
+            base_c = group['c']
+            base_s = group['s']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+            c_min = group['c_min']
+            c_max = group['c_max']
+            s_warmup_steps = group['s_warmup_steps']
+            adaptive_lr = group['adaptive_lr']
+
+            # Compute group-level statistics
+            M2 = 0.0
+            total_params = 0
+            total_grad_norm = 0.0
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                M2 += torch.sum(p.data ** 2).item()
+                total_params += p.data.numel()
+                total_grad_norm += p.grad.norm().item()
+
+            M2 = M2 / total_params if total_params > 0 else 0.0
+            avg_grad_norm = total_grad_norm / max(1, len([p for p in group['params'] if p.grad is not None]))
+            
+            # Update gradient norm EMA for adaptive c
+            if self.grad_norm_ema is None:
+                self.grad_norm_ema = avg_grad_norm
+                self.grad_norm_std = 0.1
+            else:
+                alpha = 0.1  # EMA coefficient
+                delta = avg_grad_norm - self.grad_norm_ema
+                self.grad_norm_ema = self.grad_norm_ema + alpha * delta
+                self.grad_norm_std = (1 - alpha) * self.grad_norm_std + alpha * abs(delta)
+
+            # -------- ADAPTIVE HYPERPARAMETERS --------
+            
+            # Adaptive c: INCREASES when gradients get smaller (training stalls)
+            # Normalized gradient deviation from EMA
+            if self.grad_norm_std > 1e-8:
+                grad_deviation = (self.grad_norm_ema - avg_grad_norm) / (self.grad_norm_std + 1e-8)
+                # Sigmoid to map to [0, 1], then scale to [c_min, c_max]
+                c_scale = torch.sigmoid(torch.tensor(grad_deviation)).item()
+                c_t = c_min + (c_max - c_min) * c_scale
+            else:
+                c_t = base_c
+            
+            # Adaptive s: warmup schedule (gradually increase, then plateau)
+            if self.global_step < s_warmup_steps:
+                warmup_progress = self.global_step / s_warmup_steps
+                s_t = base_s * warmup_progress  # Linear warmup
+            else:
+                s_t = base_s  # Hold at base value
+            
+            # Adaptive lr (conservative version, optional)
+            if adaptive_lr and self.grad_norm_ema > 0:
+                # Only reduce lr slightly when gradients are very large
+                lr_scale = 1.0 / (1.0 + 0.1 * max(0, avg_grad_norm / self.grad_norm_ema - 1.0))
+                lr_t = base_lr * lr_scale
+            else:
+                lr_t = base_lr
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                # Weight decay
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr_t * weight_decay)
+
+                grad = p.grad.data
+                state = self.state[p]
+
+                # Initialize state
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+
+                # Momentum updates
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Bias correction
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                # Standard AdamW update
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr_t / bias_correction1
+                update_adam = -step_size * (exp_avg / denom)
+
+                # Thermostat modulation
+                gamma = math.tanh(M2 / (s_t * s_t + eps)) if s_t > eps else 0.0
+
+                # Threshold
+                threshold = lr_t * c_t
+
+                # Soft mixing
+                alpha = torch.clamp(1 - update_adam.abs() / (threshold + eps), min=0.0, max=1.0)
+
+                # Escape direction
+                p_mean = p.data.mean()
+                escape_direction = torch.sign(p.data - p_mean)
+                escape_direction[escape_direction == 0] = 1.0
+                escape_update = escape_direction * threshold
+
+                # Final update
+                final_update = (1 - alpha) * update_adam + alpha * gamma * escape_update
+
+                # Apply
+                p.data.add_(final_update)
+
+        return loss
+
+
+class DynamoV2AdaptiveSimple(torch.optim.Optimizer):
+    """
+    Simplified adaptive version - only adapts c based on gradient statistics
+    Most likely to match or beat DynamoV2 performance
+    """
+
+    def __init__(self, params, lr=1e-3, c=0.075, s=3,
+                 betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=1e-2):
+        defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps,
+                        weight_decay=weight_decay)
+        super().__init__(params, defaults)
+        
+        self.grad_norm_history = []
+        self.max_history = 100
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            base_lr = group['lr']
+            base_c = group['c']
+            base_s = group['s']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+
+            # Compute group statistics
+            M2 = 0.0
+            total_params = 0
+            total_grad_norm = 0.0
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                M2 += torch.sum(p.data ** 2).item()
+                total_params += p.data.numel()
+                total_grad_norm += p.grad.norm().item()
+
+            M2 = M2 / total_params if total_params > 0 else 0.0
+            avg_grad_norm = total_grad_norm / max(1, len([p for p in group['params'] if p.grad is not None]))
+            
+            # Track gradient norm history
+            self.grad_norm_history.append(avg_grad_norm)
+            if len(self.grad_norm_history) > self.max_history:
+                self.grad_norm_history.pop(0)
+            
+            # Adaptive c: increase when current grad is below recent average
+            if len(self.grad_norm_history) > 10:
+                recent_avg = sum(self.grad_norm_history[-10:]) / 10
+                if avg_grad_norm < 0.5 * recent_avg:  # Gradient dropped significantly
+                    c_t = base_c * 1.5  # Boost escape strength
+                elif avg_grad_norm > 2.0 * recent_avg:  # Gradient spiked
+                    c_t = base_c * 0.75  # Reduce escape strength
+                else:
+                    c_t = base_c
+            else:
+                c_t = base_c
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                if weight_decay != 0:
+                    p.data.mul_(1 - base_lr * weight_decay)
+
+                grad = p.grad.data
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = base_lr / bias_correction1
+                update_adam = -step_size * (exp_avg / denom)
+
+                gamma = math.tanh(M2 / (base_s * base_s + eps))
+                threshold = base_lr * c_t
+
+                alpha = torch.clamp(1 - update_adam.abs() / (threshold + eps), min=0.0, max=1.0)
+
+                p_mean = p.data.mean()
+                escape_direction = torch.sign(p.data - p_mean)
+                escape_direction[escape_direction == 0] = 1.0
+                escape_update = escape_direction * threshold
+
+                final_update = (1 - alpha) * update_adam + alpha * gamma * escape_update
                 p.data.add_(final_update)
 
         return loss
