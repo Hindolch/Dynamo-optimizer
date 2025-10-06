@@ -49,7 +49,7 @@ class DynamoV3(torch.optim.Optimizer):
         if not 0.0 <= c:
             raise ValueError(f"Invalid c value: {c}")
         if not 0.0 <= s:
-            raise ValueError(f"Invalid s value: {s}")
+            raise ValueError(f"Invalid s value: {}")
 
         defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps, weight_decay=weight_decay)
         super().__init__(params, defaults)
