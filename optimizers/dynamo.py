@@ -1001,3 +1001,454 @@ class DynamoV2AdaptiveSimple(torch.optim.Optimizer):
                 p.data.add_(final_update)
 
         return loss
+
+
+class DynamoV3(torch.optim.Optimizer):
+    """
+    Implements the improved Dynamo optimizer (Version V2), which solves convergence issues using state-dependent regularization.
+    Core improvement: Utilizes the second-moment of parameter groups to adjust the strength of the escape mechanism, making it automatically weaken during convergence.
+    """
+    def __init__(self, params, lr=1e-3,  c=0.075, s=3,betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2):
+        """
+        Initializes the improved Dynamo optimizer.
+
+        Args:
+            params (iterable): Model parameters.
+            lr (float, optional): Learning rate (default: 1e-3).
+            c (float, optional): Relative escape strength coefficient (default: 0.1).
+            s (float, optional): Feature scale parameter, defines the activation boundary of the escape mechanism (default: 0.01).
+            betas (Tuple[float, float], optional): Coefficients for calculating momentum and RMSprop (default: (0.9, 0.999)).
+            eps (float, optional): Term added to the denominator for numerical stability (default: 1e-8).
+            weight_decay (float, optional): Weight decay coefficient (default: 0.01).
+        """
+        if not 0.0 <= lr:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= eps:
+            raise ValueError(f"Invalid epsilon value: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+        if not 0.0 <= c:
+            raise ValueError(f"Invalid c value: {c}")
+        if not 0.0 <= s:
+            raise ValueError(f"Invalid s value: {s}")
+
+        defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            c = group['c']
+            s = group['s']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+            
+            # Calculate the average second-moment M2 of gradients
+            M2_grad = 0.0
+            total_params = 0
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                M2_grad += torch.sum(p.grad**2).item()
+                total_params += p.grad.numel()
+
+            M2_grad = M2_grad / total_params if total_params > 0 else 0.0
+
+            # Calculate the state-dependent modulation factor γ
+            if s > 0 and M2_grad > 0:
+                gamma = math.tanh(M2_grad / (s * s))
+            else:
+                gamma = 0.0
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                # 1. AdamW: Decouple weight decay from gradient
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
+
+                grad = p.grad.data
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, memory_format=torch.preserve_format)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+                
+                # 2. Calculate first-order and second-order momentum
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # 3. Bias correction
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                
+                # 4. Calculate standard Adam update
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+                update_adam = -step_size * (exp_avg / denom)
+
+                # 5. Dynamo-V2 core logic: State-dependent soft escape mechanism
+                threshold = lr * c
+                
+                # Calculate soft mixing factor α
+                alpha = torch.clamp(1 - update_adam.abs() / threshold, min=0.0)
+                
+                # Calculate escape update
+                #p_mean = p.data.mean()
+                escape_direction = torch.sign(grad).flip(dims=[0])
+                # Handle cases where p.data == p_mean to avoid zero updates
+                escape_direction[escape_direction == 0] = 1.0
+                escape_update = escape_direction * threshold
+                
+                # 6. Synthesize final update: Soft mixing + state modulation
+                final_update = (1 - alpha) * update_adam + alpha * gamma * escape_update
+
+                # 7. Apply final update
+                p.data.add_(final_update)
+
+        return loss
+
+class BioStatis(torch.optim.Optimizer):
+    """
+    Biostatis Optimizer
+    -------------------
+    A biologically inspired optimizer that performs *homeostatic regulation* 
+    of gradient energy to maintain stable and efficient learning.
+
+    Core idea: Gradients behave like neural activity. When energy (variance) 
+    is too low → amplify learning (excitation). When too high → suppress it (inhibition).
+    """
+    def __init__(self, params, lr=0.002, betas=(0.9,0.999), eps=1e-8, weight_decay=0.01, homeo_rate=0.05,target_energy=1e-3):
+        """
+        Args:
+            params (iterable): Model parameters.
+            lr (float): Learning rate.
+            betas (Tuple[float, float]): Adam-like momentum coefficients.
+            eps (float): Numerical stability constant.
+            weight_decay (float): Weight decay factor.
+            homeo_rate (float): Homeostatic adaptation rate (default: 0.05).
+            target_energy (float): Desired gradient energy equilibrium.
+        """
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, homeo_rate=homeo_rate, target_energy=target_energy)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self,closure=None):
+        """
+        Performs a single optimization step.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            weight_decay = group['weight_decay']
+            homeo_rate = group['homeo_rate']
+            target_energy = group['target_energy']
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                    
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("Biostatis does not support sparse gradients")
+                
+                state = self.state[p]
+
+                #state initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+                    state['energy'] = torch.zeros_like(p.data) #biological gradient "energy"
+
+                exp_avg,exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                energy = state['energy']
+
+                state['step'] +=1
+
+                # --- Adam-style moving averages ---
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+
+                # --- Homeostatic energy tracking ---
+                energy.mul_(1 - homeo_rate).addcmul_(grad, grad, value=homeo_rate)
+
+                # --- Compute deviation from homeostasis ---
+                deviation = (energy - target_energy) / (target_energy + eps)
+                # If energy > target -> inhibitory scaling; if < target -> excitatory scaling
+                homeo_factor = torch.exp(-0.5 * deviation)
+
+                # --- Compute final adaptive update ---
+                update = -step_size * (exp_avg / denom)
+                update = update * homeo_factor  # biologically regulated update
+
+                # --- Weight decay ---
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
+
+                # --- Apply update ---
+                p.add_(update)
+
+        return loss
+
+class DynamoGrok(torch.optim.Optimizer):
+    """
+    DynamoGrok Optimizer: Designed for accelerated Grokking.
+    """
+    def __init__(self, params, lr=1e-3, c=0.075, s=3, betas=(0.9, 0.999), eps=1e-8, 
+                 weight_decay=1e-2, beta_wd=2.0, epsilon_wd=1e-6):
+        
+        if not 0.0 <= lr:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if not 0.0 <= eps:
+            raise ValueError(f"Invalid epsilon value: {eps}")
+        if not 0.0 <= betas[0] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 0: {betas[0]}")
+        if not 0.0 <= betas[1] < 1.0:
+            raise ValueError(f"Invalid beta parameter at index 1: {betas[1]}")
+        if not 0.0 <= weight_decay:
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+        if not 1.0 <= beta_wd:
+            raise ValueError(f"Invalid beta_wd (should be >= 1): {beta_wd}")
+        if not 0.0 <= epsilon_wd < 1.0:
+            raise ValueError(f"Invalid epsilon_wd: {epsilon_wd}")
+
+        defaults = dict(lr=lr, c=c, s=s, betas=betas, eps=eps, weight_decay=weight_decay,
+                        beta_wd=beta_wd, epsilon_wd=epsilon_wd)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            # Extract group-specific hyperparameters
+            lr = group['lr']
+            c = group['c']
+            s = group['s']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            base_wd = group['weight_decay']
+            beta_wd = group['beta_wd']
+            epsilon_wd = group['epsilon_wd']
+            
+            # Get layer info (default to 0/1 if not provided)
+            layer_idx = group.get('layer_idx', 0)
+            total_layers = group.get('total_layers', 1)
+            
+            # =================================================================================
+            # Pass 1: Update Adam state and calculate group-specific M2
+            # =================================================================================
+            M2_accumulator_group = 0.0
+            total_params_group = 0
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                
+                grad = p.grad.data
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+                
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                state['step'] += 1
+
+                # Update first and second moments
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                
+                # Accumulate M2 calculation (using exp_avg_sq)
+                M2_accumulator_group += torch.sum(exp_avg_sq).item()
+                total_params_group += p.data.numel()
+
+            # =================================================================================
+            # Calculate group-specific thermostat (gamma) and dynamic WD
+            # =================================================================================
+            
+            # Group-level thermostat condition (based on M2_group)
+            M2_group = M2_accumulator_group / total_params_group if total_params_group > 0 else 0.0
+            gamma_group = math.tanh(M2_group / (s * s)) if s > 0 and M2_group > 0 else 0.0
+
+            # Dynamic Weight Decay calculation
+            if total_layers > 1:
+                # Spatial component: Stronger WD for deeper layers
+                lambda_l = epsilon_wd + (1 - epsilon_wd) * (layer_idx / (total_layers - 1))**beta_wd
+            else:
+                lambda_l = 1.0
+            
+            # Temporal component: Reduce WD when learning is active (High M2 -> Low g_m2)
+            g_m2 = math.exp(-M2_group / (s * s)) if s > 0 else 1.0
+            
+            # Final dynamic weight decay
+            dynamic_wd = base_wd * lambda_l * g_m2
+
+            # =================================================================================
+            # Pass 2: Calculate and apply final update
+            # =================================================================================
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                
+                # Apply dynamic weight decay (AdamW style)
+                if dynamic_wd != 0:
+                    p.data.mul_(1 - lr * dynamic_wd)
+
+                state = self.state[p]
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                
+                # Bias correction
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                
+                # Adam update component
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                update_adam = - (lr / bias_correction1) * (exp_avg / denom)
+                
+                # Improved escape mechanism
+                threshold = lr * c
+                alpha = torch.clamp(1 - update_adam.abs() / threshold, min=0.0)
+                
+                # Action: Use gradient sign for targeted push
+                escape_direction = torch.sign(p.grad.data)
+                escape_update = escape_direction * threshold
+                
+                # Combine final update using group-specific gamma
+                final_update = (1 - alpha) * update_adam + alpha * gamma_group * escape_update
+                
+                p.data.add_(final_update)
+                
+        return loss
+
+
+class BiostatisV2(torch.optim.Optimizer):
+    """
+    BiostatisV2: Biological optimizer inspired by neural energy homeostasis.
+    
+    Instead of variance, it interprets gradients themselves as energy flows.
+    It balances them through global homeostasis — maintaining stable, coherent
+    "signal energy" dynamics like a biological nervous system.
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=1e-2, homeo_rate=0.05, 
+                 coherence_target=0.8):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay,
+                        homeo_rate=homeo_rate,
+                        coherence_target=coherence_target)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            wd = group['weight_decay']
+            homeo_rate = group['homeo_rate']
+            coherence_target = group['coherence_target']
+
+            # Compute global gradient coherence (directional energy alignment)
+            all_grads = []
+            for p in group['params']:
+                if p.grad is not None:
+                    all_grads.append(p.grad.view(-1))
+            if len(all_grads) > 0:
+                g_cat = torch.cat(all_grads)
+                # Normalize and measure pairwise cosine coherence
+                coherence = torch.mean(torch.abs(torch.tanh(g_cat))).item()
+            else:
+                coherence = 1.0
+
+            # Homeostatic global modulation factor
+            # If coherence < target → amplify updates (system underactive)
+            # If coherence > target → dampen updates (system overexcited)
+            homeo_mod = math.exp(-(coherence - coherence_target))
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+
+                if grad.is_sparse:
+                    raise RuntimeError("BiostatisV2 does not support sparse gradients")
+
+                state = self.state[p]
+
+                # --- Init state ---
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['energy_flow'] = torch.zeros_like(p)  # directional energy
+
+                exp_avg, exp_avg_sq, energy_flow = state['exp_avg'], state['exp_avg_sq'], state['energy_flow']
+                state['step'] += 1
+
+                # --- Adam-style momentum ---
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # --- Gradient-as-energy dynamics ---
+                # Treat the direction of gradient as energy flow vector
+                flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
+                # Update the "energy flow" with homeostatic feedback
+                energy_flow.mul_(1 - homeo_rate).add_(grad * flow_change, alpha=homeo_rate)
+
+                # --- Compute adaptive step size ---
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+
+                # --- Apply homeostatic regulation ---
+                adaptive_update = -step_size * homeo_mod * (exp_avg / denom + 0.01 * energy_flow)
+
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
+
+                p.add_(adaptive_update)
+
+        return loss

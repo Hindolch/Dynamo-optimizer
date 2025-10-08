@@ -175,8 +175,8 @@ from muon import Muon
 # Your custom optimizers
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from optimizers.adamw_wrapper import AdamWWrapper
-from optimizers.dynamo import TargetedDynamo
-from optimizers.dynamo import DynamoV2, DynamoV2Adaptive, DynamoV2AdaptiveSimple
+from optimizers.dynamo import BiostatisV2, TargetedDynamo
+from optimizers.dynamo import DynamoV2, DynamoV2Adaptive, DynamoV2AdaptiveSimple, DynamoV3, BiostatisV2, DynamoGrok
 from gpu_monitor import start_gpu_monitor
 from torch.optim import RAdam
 from optimizers.muon import SingleDeviceMuon
@@ -306,53 +306,74 @@ def main():
     
         
         # Official Lion
-        ("Lion", Lion, {
-            "lr": 1e-4,
-            "weight_decay": 3e-2,
-        }),
+        # ("Lion", Lion, {
+        #     "lr": 1e-4,
+        #     "weight_decay": 3e-2,
+        # }),
         
-        # Muon optimizer
-        # From the paper: lr=0.02 works well for CIFAR-10
-        ("Muon", Muon, {
-            "lr": 0.02,
-            "momentum": 0.95,
-            "weight_decay": 0,  # Muon handles weight decay internally
-        }),
+        # # Muon optimizer
+        # # From the paper: lr=0.02 works well for CIFAR-10
+        # ("Muon", Muon, {
+        #     "lr": 0.02,
+        #     "momentum": 0.95,
+        #     "weight_decay": 0,  # Muon handles weight decay internally
+        # }),
         
         # Your Dynamo variants
-        ("Dynamo", TargetedDynamo, {
-            "lr": 2e-4, 
+        # ("Dynamo", TargetedDynamo, {
+        #     "lr": 2e-4, 
+        #     "weight_decay": 1e-2
+        # }),
+        
+        # ("DynamoV2", DynamoV2, {
+        #     "lr": 1e-3,
+        #     "c": 0.075,
+        #     "s": 3,
+        #     "weight_decay": 1e-2,
+        # }),
+        
+        # ("DynamoV2Adaptive", DynamoV2Adaptive, {
+        #     "lr": 1e-3,
+        #     "c": 0.075,
+        #     "s": 3,
+        #     "weight_decay": 1e-2,
+        #     "adaptive_lr": True
+        # }),
+        ("DynamoV3", DynamoV3, {
+            "lr": 1e-3,
+            "c": 3,
+            "s": 3,
             "weight_decay": 1e-2
         }),
-        
-        ("DynamoV2", DynamoV2, {
+
+        ("DynamoGrok", DynamoGrok,{
             "lr": 1e-3,
-            "c": 0.075,
-            "s": 3,
-            "weight_decay": 1e-2,
-        }),
-        
-        ("DynamoV2Adaptive", DynamoV2Adaptive, {
-            "lr": 1e-3,
-            "c": 0.075,
-            "s": 3,
-            "weight_decay": 1e-2,
-            "adaptive_lr": True
-        }),
-        
-        ("DynamoV2AdaptiveSimple", DynamoV2AdaptiveSimple, {
-            "lr": 1e-3,
-            "c": 0.075,
+            "c": 3,
             "s": 3,
             "weight_decay": 1e-2
+
         }),
+
+        ("BioStatisV2", BiostatisV2,{
+            "lr": 1e-3,
+            "weight_decay": 1e-2,
+            "homeo_rate": 0.5,
+            "coherence_target": 0.8
+        }),
+        
+        # ("DynamoV2AdaptiveSimple", DynamoV2AdaptiveSimple, {
+        #     "lr": 1e-3,
+        #     "c": 0.075,
+        #     "s": 3,
+        #     "weight_decay": 1e-2
+        # }),
         
         ("RAdam", RAdam, {
             "lr": 2e-4, 
             "weight_decay": 1e-2,
             "decoupled_weight_decay": True
         }),
-        
+               
     ]
 
     for name, opt_class, opt_kwargs in optimizers_config:
@@ -363,7 +384,7 @@ def main():
             # Start GPU monitor
             gpu_thread = start_gpu_monitor(name, interval=5)
 
-            losses, accs, model = train_and_eval(name, opt_class, trainloader, testloader, device, epochs=10, **opt_kwargs)
+            losses, accs, model = train_and_eval(name, opt_class, trainloader, testloader, device, epochs=5, **opt_kwargs)
             results[name] = (losses, accs)
 
             # Save checkpoint and compute singular spectrum
