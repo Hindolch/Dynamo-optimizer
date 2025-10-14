@@ -1688,6 +1688,7 @@ class BiostatisV4(torch.optim.Optimizer):
                 
                 # --- Fractional memory flow (normalized) ---
                 """Dtα​f(t)≈Γ(1−α)1​k=0∑t​(t−k)αf′(k)​"""
+                """Mathematical representation of a fractional derivate and the code below implements that"""
                 for i, rho in enumerate(decays):
                     energy_multi[i].mul_(rho).add_(grad, alpha=(1 - rho))
                 # normalize by sum of decay weights (prevents energy overflow)
