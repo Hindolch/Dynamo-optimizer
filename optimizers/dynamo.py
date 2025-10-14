@@ -69,6 +69,8 @@
 
 import torch
 import math
+import os
+import csv
 
 from torch.optim import Optimizer
 
@@ -1445,6 +1447,284 @@ class BiostatisV2(torch.optim.Optimizer):
 
                 # --- Apply homeostatic regulation ---
                 adaptive_update = -step_size * homeo_mod * (exp_avg / denom + 0.01 * energy_flow)
+
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
+
+                p.add_(adaptive_update)
+
+        return loss
+
+
+class BiostatisV3(torch.optim.Optimizer):
+    """
+    BiostatisV3: A biologically inspired optimizer modeling neural homeostasis.
+    It regulates gradient energy flow, coherence, and polarity dynamically —
+    balancing plasticity (learning) and stability (generalization).
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=1e-2,
+                 homeo_rate=0.05, coherence_target=0.8,
+                 energy_target=1e-3, lambda_energy=0.1):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay,
+                        homeo_rate=homeo_rate,
+                        coherence_target=coherence_target,
+                        energy_target=energy_target,
+                        lambda_energy=lambda_energy)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            wd = group['weight_decay']
+            homeo_rate = group['homeo_rate']
+            coherence_target = group['coherence_target']
+            energy_target = group['energy_target']
+            lambda_energy = group['lambda_energy']
+
+            # Gather all gradients for global energy measurement
+            grads = [p.grad.view(-1) for p in group['params'] if p.grad is not None]
+            if len(grads) == 0:
+                continue
+            g_cat = torch.cat(grads)
+
+            # Compute global energy and coherence
+            energy = torch.mean(g_cat ** 2).item()
+            coherence = torch.mean(torch.abs(torch.tanh(g_cat))).item()
+
+            # Homeostatic global modulation
+            homeo_mod = math.exp(-(coherence - coherence_target))
+            energy_feedback = 1 + lambda_energy * (energy_target - energy)
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("BiostatisV3 does not support sparse gradients")
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['energy_flow'] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq, energy_flow = (
+                    state['exp_avg'], state['exp_avg_sq'], state['energy_flow']
+                )
+                state['step'] += 1
+
+                # Adam-like momentum
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Flow change and polarity modulation
+                flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
+                polarity = torch.sign(grad) * torch.tanh(flow_change)
+                adaptive_grad = grad * polarity
+
+                # Update energy flow
+                energy_flow.mul_(1 - homeo_rate).add_(adaptive_grad, alpha=homeo_rate)
+
+                # Compute adaptive step
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+
+                # Final update rule with homeostatic scaling
+                adaptive_update = -step_size * homeo_mod * energy_feedback * (
+                    exp_avg / denom + 0.05 * energy_flow
+                )
+
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
+
+                p.add_(adaptive_update)
+
+        return loss
+
+class BiostatisV4(torch.optim.Optimizer):
+    """
+    BiostatisV4: Biologically inspired optimizer uniting
+    global homeostasis, layer-wise energy balance, and fractional memory.
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=1e-2,
+                 homeo_rate=0.05, coherence_target=0.8,
+                 energy_target=1e-3, lambda_energy=0.1,
+                 min_scale=0.5, max_scale=2.0,
+                 decays=(0.95, 0.9, 0.8), decay_weights=(0.6, 0.3, 0.1),
+                 flip_threshold=0.2, ascent_strength=0.05):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay,
+                        homeo_rate=homeo_rate,
+                        coherence_target=coherence_target,
+                        energy_target=energy_target,
+                        lambda_energy=lambda_energy,
+                        min_scale=min_scale, max_scale=max_scale,
+                        decays=decays, decay_weights=decay_weights,
+                        flip_threshold=flip_threshold,
+                        ascent_strength=ascent_strength)
+        super().__init__(params, defaults)
+    
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        
+        for group in self.param_groups:
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            wd = group['weight_decay']
+            homeo_rate = group['homeo_rate']
+            coherence_target = group['coherence_target']
+            energy_target = group['energy_target']
+            lambda_energy = group['lambda_energy']
+            min_scale, max_scale = group['min_scale'], group['max_scale']
+            decays, decay_weights = group['decays'], group['decay_weights']
+            flip_threshold = group['flip_threshold']
+            ascent_strength = group['ascent_strength']
+
+            # Gather gradients for global energy and coherence
+            grads = [p.grad.view(-1) for p in group['params'] if p.grad is not None]
+            if len(grads)==0:
+                continue
+            g_cat = torch.cat(grads)
+            energy = torch.mean(g_cat ** 2).item()
+            coherence = torch.mean(torch.abs(torch.tanh(g_cat))).item()
+
+            # Global homeostatic modulation
+            # homeo_mod = math.exp(-(coherence - coherence_target))
+            # energy_feedback = 1 + lambda_energy * (energy_target - energy)
+            coherence_error = coherence - coherence_target
+            #homeo_mod = 1.0 / (1.0 + math.exp(5 * coherence_error))  # bounded sigmoid response
+            homeo_mod = 1.0 - homeo_rate * torch.tanh(torch.tensor(coherence_error)).item()
+
+
+            # Energy feedback (bounded)
+            #energy_feedback = torch.clamp(1 + lambda_energy * (energy_target - energy), 0.7, 1.3)
+            #energy_feedback = max(0.7, min(1.3, 1 + lambda_energy * (energy_target - energy)))
+            
+            # Energy feedback (blend instead of multiply)
+            raw_energy_feedback = 1 + lambda_energy * (energy_target - energy)
+            energy_feedback = 0.8 * raw_energy_feedback + 0.2  # blend toward neutrality
+            energy_feedback = max(0.85, min(1.15, energy_feedback))  # clamp gently
+
+            """LAYER-WISE ENERGY SCALING (MATRIX-STEP PROXY)"""
+            #compute mean exp_avg_sq per layer
+            layer_means = []
+            for p in group['params']:
+                if p.grad is not None:
+                    if 'exp_avg_sq' in self.state[p]:
+                        layer_means.append(self.state[p]['exp_avg_sq'].mean().item())
+                    
+            
+            # Layer scaling (stabilized)
+            # if len(layer_means) > 0:
+            #     mean_energy = max(sum(layer_means) / len(layer_means), 1e-8)
+            # else:
+            #     mean_energy = 1e-8
+            # layer_scale = 1.0 / (math.sqrt(mean_energy) + 1e-8)
+            # layer_scale = min(max(layer_scale, min_scale), max_scale)
+            
+            #layer wise energy scaling(damped)
+            if len(layer_means) > 0:
+                mean_energy = sum(layer_means) / len(layer_means)
+            else:
+                mean_energy = 1e-8
+            layer_scale = 1.0 / ((mean_energy + 1e-8) ** 0.25) #sqrt dampening
+            layer_scale = min(max(layer_scale, 0.7),1.3)
+
+            # PARAMETERS UPDATE
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("BiostatisV4 does not support sparse gradients")
+
+                state = self.state[p]
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    #fractional memory buffers
+                    state['energy_multi'] = [torch.zeros_like(p) for _ in decays]
+                
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                energy_multi = state['energy_multi']
+                state['step'] += 1
+
+                # --- Adam-style momentum updates ---
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # # --- Fractional memory energy flow ---
+                # for i, rho in enumerate(decays):
+                #     energy_multi[i].mul_(rho).add_(grad, alpha=(1 - rho))
+                # energy_flow = sum(w * m for w, m in zip(decay_weights, energy_multi))
+
+                # # --- Coherence polarity modulation (selective ascent) ---
+                # flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
+                # polarity = torch.sign(grad) * torch.tanh(flow_change)
+                # adaptive_grad = grad * polarity
+                
+                # --- Fractional memory flow (normalized) ---
+                """Dtα​f(t)≈Γ(1−α)1​k=0∑t​(t−k)αf′(k)​"""
+                for i, rho in enumerate(decays):
+                    energy_multi[i].mul_(rho).add_(grad, alpha=(1 - rho))
+                # normalize by sum of decay weights (prevents energy overflow)
+                decay_norm = sum(decay_weights)
+                energy_flow = sum((w / decay_norm) * m for w, m in zip(decay_weights, energy_multi))
+
+                # --- Coherence polarity modulation (less aggressive) ---
+                flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
+                polarity = 0.5 * torch.sign(grad) * torch.tanh(flow_change)  # halved polarity
+                adaptive_grad = grad * (1.0 + polarity)
+
+                # Progressive stabilization for ascent
+                ascent_strength_scaled = ascent_strength * (1 - math.exp(-0.05 * state['step']))
+
+
+                # Underactive parameters → mild ascent (maintain diversity)
+                # importance = (exp_avg.abs().mean() /
+                #               (exp_avg_sq.sqrt().mean() + 1e-12))
+                # if importance < flip_threshold:
+                #     adaptive_grad.add_(ascent_strength_scaled * grad)
+                
+                # --- Selective ascent (self-decaying) ---
+                importance = (exp_avg.abs().mean() / (exp_avg_sq.sqrt().mean() + 1e-12))
+                ascent_decay = 1 - math.exp(-0.02 * state['step'])
+                if importance < flip_threshold:
+                    adaptive_grad.add_(ascent_strength * ascent_decay * grad)
+
+                # --- Compute adaptive step ---
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+
+                # --- Final update rule ---
+                adaptive_update = -step_size * homeo_mod * energy_feedback * layer_scale * (
+                    exp_avg / denom + 0.05 * energy_flow + 0.01 * adaptive_grad
+                )
 
                 if wd != 0:
                     p.data.mul_(1 - lr * wd)

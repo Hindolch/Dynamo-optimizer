@@ -176,7 +176,7 @@ from muon import Muon
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from optimizers.adamw_wrapper import AdamWWrapper
 from optimizers.dynamo import BiostatisV2, TargetedDynamo
-from optimizers.dynamo import DynamoV2, DynamoV2Adaptive, DynamoV2AdaptiveSimple, DynamoV3, BiostatisV2, DynamoGrok
+from optimizers.dynamo import DynamoV2, DynamoV2Adaptive, DynamoV2AdaptiveSimple, DynamoV3, BiostatisV2, DynamoGrok, BiostatisV3, BiostatisV4
 from gpu_monitor import start_gpu_monitor
 from torch.optim import RAdam
 from optimizers.muon import SingleDeviceMuon
@@ -339,20 +339,20 @@ def main():
         #     "weight_decay": 1e-2,
         #     "adaptive_lr": True
         # }),
-        ("DynamoV3", DynamoV3, {
-            "lr": 1e-3,
-            "c": 3,
-            "s": 3,
-            "weight_decay": 1e-2
-        }),
+        # ("DynamoV3", DynamoV3, {
+        #     "lr": 1e-3,
+        #     "c": 3,
+        #     "s": 3,
+        #     "weight_decay": 1e-2
+        # }),
 
-        ("DynamoGrok", DynamoGrok,{
-            "lr": 1e-3,
-            "c": 3,
-            "s": 3,
-            "weight_decay": 1e-2
+        # ("DynamoGrok", DynamoGrok,{
+        #     "lr": 1e-3,
+        #     "c": 3,
+        #     "s": 3,
+        #     "weight_decay": 1e-2
 
-        }),
+        # }),
 
         ("BioStatisV2", BiostatisV2,{
             "lr": 1e-3,
@@ -367,7 +367,23 @@ def main():
         #     "s": 3,
         #     "weight_decay": 1e-2
         # }),
-        
+        ("BiostatisV3", BiostatisV3,{
+            "lr": 1e-3,
+            "weight_decay": 1e-2,
+            "homeo_rate": 0.5,
+            "coherence_target": 0.8,
+            "energy_target": 1e-4,
+            "lambda_energy": 0.1
+        }),
+        ("BiostatisV4", BiostatisV4,{
+            "lr": 1e-3,
+            "weight_decay": 1e-2,
+            "homeo_rate": 0.5,
+            "coherence_target": 0.8,
+            "energy_target": 1e-4,
+            "lambda_energy": 0.1
+        }),
+
         ("RAdam", RAdam, {
             "lr": 2e-4, 
             "weight_decay": 1e-2,
