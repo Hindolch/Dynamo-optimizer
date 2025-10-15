@@ -354,27 +354,27 @@ def main():
 
         # }),
 
-        ("BioStatisV2", BiostatisV2,{
-            "lr": 1e-3,
-            "weight_decay": 1e-2,
-            "homeo_rate": 0.5,
-            "coherence_target": 0.8
-        }),
-        
-        # ("DynamoV2AdaptiveSimple", DynamoV2AdaptiveSimple, {
+        # ("BioStatisV2", BiostatisV2,{
         #     "lr": 1e-3,
-        #     "c": 0.075,
-        #     "s": 3,
-        #     "weight_decay": 1e-2
+        #     "weight_decay": 1e-2,
+        #     "homeo_rate": 0.5,
+        #     "coherence_target": 0.8
         # }),
-        ("BiostatisV3", BiostatisV3,{
-            "lr": 1e-3,
-            "weight_decay": 1e-2,
-            "homeo_rate": 0.5,
-            "coherence_target": 0.8,
-            "energy_target": 1e-4,
-            "lambda_energy": 0.1
-        }),
+        
+        # # ("DynamoV2AdaptiveSimple", DynamoV2AdaptiveSimple, {
+        # #     "lr": 1e-3,
+        # #     "c": 0.075,
+        # #     "s": 3,
+        # #     "weight_decay": 1e-2
+        # # }),
+        # ("BiostatisV3", BiostatisV3,{
+        #     "lr": 1e-3,
+        #     "weight_decay": 1e-2,
+        #     "homeo_rate": 0.5,
+        #     "coherence_target": 0.8,
+        #     "energy_target": 1e-4,
+        #     "lambda_energy": 0.1
+        # }),
         ("BiostatisV4", BiostatisV4,{
             "lr": 1e-3,
             "weight_decay": 1e-2,

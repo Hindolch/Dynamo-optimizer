@@ -1686,14 +1686,39 @@ class BiostatisV4(torch.optim.Optimizer):
                 # polarity = torch.sign(grad) * torch.tanh(flow_change)
                 # adaptive_grad = grad * polarity
                 
-                # --- Fractional memory flow (normalized) ---
+                # --- Fractional memory flow (normalized)(multi-scale exponential memory) ---
                 """Dtα​f(t)≈Γ(1−α)1​k=0∑t​(t−k)αf′(k)​"""
                 """Mathematical representation of a fractional derivate and the code below implements that"""
-                for i, rho in enumerate(decays):
-                    energy_multi[i].mul_(rho).add_(grad, alpha=(1 - rho))
-                # normalize by sum of decay weights (prevents energy overflow)
-                decay_norm = sum(decay_weights)
-                energy_flow = sum((w / decay_norm) * m for w, m in zip(decay_weights, energy_multi))
+                # for i, rho in enumerate(decays):
+                #     energy_multi[i].mul_(rho).add_(grad, alpha=(1 - rho))
+                # # normalize by sum of decay weights (prevents energy overflow)
+                # decay_norm = sum(decay_weights)
+                # energy_flow = sum((w / decay_norm) * m for w, m in zip(decay_weights, energy_multi))
+                
+                alpha = 0.3 #fractional order (0<alpha<1)
+                max_history = 50
+                #initialize gradient history
+                if "grad_history" not in state:
+                    state["grad_history"] = []
+                
+                #append current gradient
+                state["grad_history"].append(grad.clone())
+                if len(state["grad_history"]) > max_history:
+                    state["grad_history"].pop(0)
+
+                #compute fractional weights (power-law decay)
+                history_len = len(state["grad_history"])
+                weights = torch.tensor(
+                    [(1.0 / ((history_len - i) ** alpha)) for i in range(history_len)],
+                    device=grad.device,
+                    dtype=grad.dtype
+                )
+                weights /= weights.sum() #normalize
+                #fractional energy flow
+                energy_flow = torch.zeros_like(grad)
+                for w,g in zip(weights, state["grad_history"]):
+                    energy_flow.add(w*g)
+                
 
                 # --- Coherence polarity modulation (less aggressive) ---
                 flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
