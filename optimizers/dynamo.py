@@ -1695,6 +1695,7 @@ class BiostatisV4(torch.optim.Optimizer):
                 # decay_norm = sum(decay_weights)
                 # energy_flow = sum((w / decay_norm) * m for w, m in zip(decay_weights, energy_multi))
                 
+                """Power-law weighted gradient memory"""
                 alpha = 0.3 #fractional order (0<alpha<1)
                 max_history = 50
                 #initialize gradient history
