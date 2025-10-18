@@ -1602,6 +1602,11 @@ class BiostatisV4(torch.optim.Optimizer):
             flip_threshold = group['flip_threshold']
             ascent_strength = group['ascent_strength']
 
+            torch.cuda.reset_peak_memory_stats()
+            # # run a mini mini-batch update
+            # print("Current allocated", torch.cuda.memory_allocated() / (1024**3), "GB")
+            # print("Peak allocated", torch.cuda.max_memory_allocated() / (1024**3), "GB")
+
             # Gather gradients for global energy and coherence
             grads = [p.grad.view(-1) for p in group['params'] if p.grad is not None]
             if len(grads)==0:
@@ -1663,10 +1668,10 @@ class BiostatisV4(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p)
-                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state['exp_avg'] = torch.zeros_like(p, dtype=torch.float32)
+                    state['exp_avg_sq'] = torch.zeros_like(p, dtype=torch.float32)
                     #fractional memory buffers
-                    state['energy_multi'] = [torch.zeros_like(p) for _ in decays]
+                    state['energy_multi'] = [torch.zeros_like(p, dtype=torch.float16) for _ in decays]
                 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
                 energy_multi = state['energy_multi']
@@ -1697,7 +1702,7 @@ class BiostatisV4(torch.optim.Optimizer):
                 
                 """Power-law weighted gradient memory"""
                 alpha = 0.3 #fractional order (0<alpha<1)
-                max_history = 50
+                max_history = 20
                 #initialize gradient history
                 if "grad_history" not in state:
                     state["grad_history"] = []
@@ -1753,6 +1758,147 @@ class BiostatisV4(torch.optim.Optimizer):
                     exp_avg / denom + 0.05 * energy_flow + 0.01 * adaptive_grad
                 )
 
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
+
+                p.add_(adaptive_update)
+
+        return loss
+
+class BiostatisV5(torch.optim.Optimizer):
+    """
+    Memory-optimized BiostatisV5: Replaces gradient history with multi-scale EMAs.
+    Memory overhead: 5x (vs original 22x)
+    """
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=1e-2,
+                 homeo_rate=0.05, coherence_target=0.8,
+                 energy_target=1e-3, lambda_energy=0.1,
+                 memory_decays=(0.9, 0.95, 0.99),  # Multi-scale timescales
+                 memory_weights=(0.5, 0.3, 0.2),   # Importance weights
+                 flip_threshold=0.2, ascent_strength=0.05):
+        
+        defaults = dict(
+            lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
+            homeo_rate=homeo_rate, coherence_target=coherence_target,
+            energy_target=energy_target, lambda_energy=lambda_energy,
+            memory_decays=memory_decays, memory_weights=memory_weights,
+            flip_threshold=flip_threshold, ascent_strength=ascent_strength
+        )
+        super().__init__(params, defaults)
+    
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        
+        for group in self.param_groups:
+            lr = group['lr']
+            beta1, beta2 = group['betas']
+            eps = group['eps']
+            wd = group['weight_decay']
+            homeo_rate = group['homeo_rate']
+            coherence_target = group['coherence_target']
+            energy_target = group['energy_target']
+            lambda_energy = group['lambda_energy']
+            memory_decays = group['memory_decays']
+            memory_weights = group['memory_weights']
+            flip_threshold = group['flip_threshold']
+            ascent_strength = group['ascent_strength']
+
+            # Global statistics
+            grads = [p.grad.view(-1) for p in group['params'] if p.grad is not None]
+            if len(grads) == 0:
+                continue
+            g_cat = torch.cat(grads)
+            energy = torch.mean(g_cat ** 2).item()
+            coherence = torch.mean(torch.abs(torch.tanh(g_cat))).item()
+
+            # Homeostatic modulation
+            coherence_error = coherence - coherence_target
+            homeo_mod = 1.0 - homeo_rate * torch.tanh(torch.tensor(coherence_error)).item()
+
+            # Energy feedback
+            raw_energy_feedback = 1 + lambda_energy * (energy_target - energy)
+            energy_feedback = 0.8 * raw_energy_feedback + 0.2
+            energy_feedback = max(0.85, min(1.15, energy_feedback))
+
+            # Layer-wise scaling
+            layer_means = []
+            for p in group['params']:
+                if p.grad is not None and 'exp_avg_sq' in self.state[p]:
+                    layer_means.append(self.state[p]['exp_avg_sq'].mean().item())
+            
+            if len(layer_means) > 0:
+                mean_energy = sum(layer_means) / len(layer_means)
+            else:
+                mean_energy = 1e-8
+            layer_scale = 1.0 / ((mean_energy + 1e-8) ** 0.25)
+            layer_scale = min(max(layer_scale, 0.7), 1.3)
+
+            # Parameter updates
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                    
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError("BiostatisV5 does not support sparse gradients")
+
+                state = self.state[p]
+                
+                # Initialize state - MEMORY OPTIMIZED
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p)
+                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    # Replace grad_history with multi-scale EMAs
+                    state['memory_emas'] = [torch.zeros_like(p) for _ in memory_decays]
+                
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                memory_emas = state['memory_emas']
+                state['step'] += 1
+
+                # Standard Adam momentum
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                # Multi-scale fractional memory (MEMORY EFFICIENT)
+                # Update all memory timescales
+                for ema, decay in zip(memory_emas, memory_decays):
+                    ema.mul_(decay).add_(grad, alpha=1 - decay)
+                
+                # Weighted combination approximates power-law memory
+                energy_flow = torch.zeros_like(grad)
+                for weight, ema in zip(memory_weights, memory_emas):
+                    energy_flow.add_(ema, alpha=weight)
+
+                # Coherence polarity modulation
+                flow_change = torch.cosine_similarity(exp_avg.flatten(), grad.flatten(), dim=0)
+                polarity = 0.5 * torch.sign(grad) * torch.tanh(flow_change)
+                adaptive_grad = grad * (1.0 + polarity)
+
+                # Selective ascent
+                importance = exp_avg.abs().mean() / (exp_avg_sq.sqrt().mean() + 1e-12)
+                ascent_decay = 1 - math.exp(-0.02 * state['step'])
+                if importance < flip_threshold:
+                    adaptive_grad.add_(ascent_strength * ascent_decay * grad)
+
+                # Compute adaptive step
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+                step_size = lr / bias_correction1
+
+                # Final update
+                adaptive_update = -step_size * homeo_mod * energy_feedback * layer_scale * (
+                    exp_avg / denom + 0.05 * energy_flow + 0.01 * adaptive_grad
+                )
+
+                # Weight decay
                 if wd != 0:
                     p.data.mul_(1 - lr * wd)
 
