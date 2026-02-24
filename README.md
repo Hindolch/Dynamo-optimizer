@@ -6,7 +6,7 @@
 
 ## 🌱 Intuition
 
-Biological neurons maintain *homeostasis* — stable internal activity levels even when stimuli vary.
+Biological neurons maintain *homeostasis*, stable internal activity levels even when stimuli vary.
 **BiostatisV6** brings this principle to deep optimization by monitoring **gradient “activity”** and **coherence** across the model and dynamically adjusting learning behavior to remain within a healthy range.
 
 ---
